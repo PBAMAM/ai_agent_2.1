@@ -1,0 +1,59 @@
+version: "3"
+output: interleaved
+dotenv: [".env.local"]
+
+vars:
+  TERM: screen-256color
+  MAIN_PYTHON: python3
+  LOCAL_PATH:
+    sh: 'echo "$(cd "$( dirname -- "$0" )" && pwd)"'
+  venv_path: "{{.LOCAL_PATH}}/.venv"
+  venv_bin_path: "{{.LOCAL_PATH}}/.venv/bin"
+  venv_python: "{{.LOCAL_PATH}}/.venv/bin/python3"
+  venv_pip: "{{.LOCAL_PATH}}/.venv/bin/pip3"
+
+tasks:
+  post_create:
+    desc: "Runs after this template is instantiated as a Sandbox or Bootstrap"
+    cmds:
+      - echo -e "To setup and run the agent:\r\n"
+      - echo -e "\tcd {{.ROOT_DIR}}\r"
+      - echo -e "\tpython3 -m venv venv\r"
+      - platforms: [darwin, linux]
+        cmd: echo -e "\tsource venv/bin/activate\r"
+      - platforms: [windows]
+        cmd: echo -e "\tpowershell venv/Scripts/Activate.ps1\r"
+      - echo -e "\tpip install -r requirements.txt\r"
+      - echo -e "\tpython3 assistant.py download-files\r"
+      - echo -e "\tpython3 assistant.py dev\r\n"
+
+  install:
+    desc: "Bootstrap application for local development"
+    cmds:
+      - "python3 -m venv .venv"
+      # - "source {{.venv_bin_path}}/activate"
+      - platforms: [darwin, linux]
+        cmd: "source {{.venv_bin_path}}/activate"
+      - platforms: [windows]
+        cmd: "powershell {{.venv_bin_path}}/Scripts/Activate.ps1"
+      - "python3 -m pip install --upgrade pip"
+      - "{{.venv_pip}} install -r requirements.txt"
+      - "{{.venv_python}} assistant.py download-files"
+
+  dev:
+    interactive: true
+    cmds:
+      - platforms: [darwin, linux]
+        cmd: "source {{.venv_bin_path}}/activate"
+      - platforms: [windows]
+        cmd: "powershell venv/Scripts/Activate.ps1"
+      - "{{.venv_python}} assistant.py dev"
+
+  console:
+    interactive: true
+    cmds:
+      - platforms: [darwin, linux]
+        cmd: "source {{.venv_bin_path}}/activate"
+      - platforms: [windows]
+        cmd: "powershell venv/Scripts/Activate.ps1"
+      - "{{.venv_python}} assistant.py console"

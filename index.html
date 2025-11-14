@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Catalina Marketing Printer Support Agent</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+        
+        .container {
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            padding: 40px;
+            max-width: 600px;
+            width: 100%;
+        }
+        
+        h1 {
+            color: #333;
+            margin-bottom: 10px;
+            font-size: 28px;
+        }
+        
+        .subtitle {
+            color: #666;
+            margin-bottom: 30px;
+            font-size: 14px;
+        }
+        
+        .status-card {
+            background: #f8f9fa;
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 30px;
+        }
+        
+        .status-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+        
+        .status-row:last-child {
+            margin-bottom: 0;
+        }
+        
+        .status-label {
+            color: #666;
+            font-weight: 500;
+        }
+        
+        .status-value {
+            color: #333;
+            font-weight: 600;
+        }
+        
+        .status-indicator {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            margin-right: 8px;
+        }
+        
+        .status-indicator.running {
+            background: #10b981;
+            box-shadow: 0 0 10px rgba(16, 185, 129, 0.5);
+            animation: pulse 2s infinite;
+        }
+        
+        .status-indicator.stopped {
+            background: #ef4444;
+        }
+        
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+        
+        .button-group {
+            display: flex;
+            gap: 15px;
+            margin-bottom: 30px;
+        }
+        
+        button {
+            flex: 1;
+            padding: 15px 30px;
+            border: none;
+            border-radius: 10px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        
+        .btn-start {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+        
+        .btn-start:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(102, 126, 234, 0.4);
+        }
+        
+        .btn-stop {
+            background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+            color: white;
+        }
+        
+        .btn-stop:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(245, 87, 108, 0.4);
+        }
+        
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        
+        .logs-container {
+            background: #1e1e1e;
+            border-radius: 12px;
+            padding: 20px;
+            max-height: 300px;
+            overflow-y: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+        }
+        
+        .logs-container::-webkit-scrollbar {
+            width: 8px;
+        }
+        
+        .logs-container::-webkit-scrollbar-track {
+            background: #2d2d2d;
+            border-radius: 4px;
+        }
+        
+        .logs-container::-webkit-scrollbar-thumb {
+            background: #555;
+            border-radius: 4px;
+        }
+        
+        .log-entry {
+            color: #d4d4d4;
+            margin-bottom: 5px;
+            line-height: 1.5;
+        }
+        
+        .log-entry.error {
+            color: #f48771;
+        }
+        
+        .log-entry.success {
+            color: #89d185;
+        }
+        
+        .log-entry.info {
+            color: #4ec9b0;
+        }
+        
+        .empty-logs {
+            color: #666;
+            text-align: center;
+            padding: 20px;
+        }
+        
+        .info-box {
+            background: #e3f2fd;
+            border-left: 4px solid #2196f3;
+            padding: 15px;
+            border-radius: 8px;
+            margin-top: 20px;
+        }
+        
+        .info-box p {
+            color: #1976d2;
+            font-size: 14px;
+            line-height: 1.6;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🖨️ Printer Support Agent</h1>
+        <p class="subtitle">Catalina Marketing - LiveKit Telephony Agent</p>
+        
+        <div class="status-card">
+            <div class="status-row">
+                <span class="status-label">Status:</span>
+                <span class="status-value">
+                    <span class="status-indicator" id="statusIndicator"></span>
+                    <span id="statusText">Stopped</span>
+                </span>
+            </div>
+            <div class="status-row">
+                <span class="status-label">Process ID:</span>
+                <span class="status-value" id="pidText">-</span>
+            </div>
+            <div class="status-row">
+                <span class="status-label">Uptime:</span>
+                <span class="status-value" id="uptimeText">-</span>
+            </div>
+        </div>
+        
+        <div class="button-group">
+            <button class="btn-start" id="startBtn" onclick="startAgent()">Start Agent</button>
+            <button class="btn-stop" id="stopBtn" onclick="stopAgent()" disabled>Stop Agent</button>
+        </div>
+        
+        <div class="logs-container" id="logsContainer">
+            <div class="empty-logs">No logs yet. Start the agent to see logs.</div>
+        </div>
+        
+        <div class="info-box">
+            <p><strong>ℹ️ Information:</strong><br>
+            The agent will connect to your LiveKit server and be ready to handle printer support calls.
+            Make sure your environment variables are configured correctly in the .env file.</p>
+        </div>
+        
+        <div class="info-box" id="serverWarning" style="background: #fff3cd; border-left-color: #ffc107; display: none;">
+            <p style="color: #856404;"><strong>⚠️ Warning:</strong><br>
+            The web server is not running. Please start it with:<br>
+            <code style="background: #f8f9fa; padding: 5px 10px; border-radius: 4px; display: inline-block; margin-top: 5px;">python web_server.py</code><br>
+            Then refresh this page or access it at <code style="background: #f8f9fa; padding: 5px 10px; border-radius: 4px;">http://localhost:5001</code></p>
+        </div>
+    </div>
+    
+    <script>
+        let statusCheckInterval;
+        
+        // Check status on page load
+        window.addEventListener('load', () => {
+            checkStatus();
+            statusCheckInterval = setInterval(checkStatus, 2000);
+        });
+        
+        window.addEventListener('beforeunload', () => {
+            if (statusCheckInterval) {
+                clearInterval(statusCheckInterval);
+            }
+        });
+        
+        // Get the API base URL - use Flask server port 5001
+        const API_BASE_URL = window.location.port === '5500' || window.location.protocol === 'file:' 
+            ? 'http://localhost:5001' 
+            : '';
+        
+        async function checkStatus() {
+            try {
+                const response = await fetch(`${API_BASE_URL}/api/status`);
+                if (!response.ok) {
+                    throw new Error(`Server not running. Please start the web server with: python web_server.py`);
+                }
+                const data = await response.json();
+                updateUI(data);
+                // Hide warning if server is responding
+                const warningBox = document.getElementById('serverWarning');
+                if (warningBox) warningBox.style.display = 'none';
+            } catch (error) {
+                console.error('Error checking status:', error);
+                // Show error message in UI
+                const statusText = document.getElementById('statusText');
+                if (statusText) {
+                    statusText.textContent = 'Server not running';
+                    statusText.style.color = '#ef4444';
+                }
+                // Show warning box
+                const warningBox = document.getElementById('serverWarning');
+                if (warningBox) warningBox.style.display = 'block';
+            }
+        }
+        
+        function updateUI(data) {
+            const statusIndicator = document.getElementById('statusIndicator');
+            const statusText = document.getElementById('statusText');
+            const pidText = document.getElementById('pidText');
+            const uptimeText = document.getElementById('uptimeText');
+            const startBtn = document.getElementById('startBtn');
+            const stopBtn = document.getElementById('stopBtn');
+            
+            if (data.running) {
+                statusIndicator.className = 'status-indicator running';
+                statusText.textContent = 'Running';
+                pidText.textContent = data.pid || '-';
+                uptimeText.textContent = data.uptime || '-';
+                startBtn.disabled = true;
+                stopBtn.disabled = false;
+            } else {
+                statusIndicator.className = 'status-indicator stopped';
+                statusText.textContent = 'Stopped';
+                pidText.textContent = '-';
+                uptimeText.textContent = '-';
+                startBtn.disabled = false;
+                stopBtn.disabled = true;
+            }
+            
+            updateLogs(data.logs || []);
+        }
+        
+        function updateLogs(logs) {
+            const logsContainer = document.getElementById('logsContainer');
+            
+            if (logs.length === 0) {
+                logsContainer.innerHTML = '<div class="empty-logs">No logs yet. Start the agent to see logs.</div>';
+                return;
+            }
+            
+            logsContainer.innerHTML = logs.slice(-50).map(log => {
+                const className = log.level || 'info';
+                return `<div class="log-entry ${className}">[${log.time}] ${log.message}</div>`;
+            }).join('');
+            
+            logsContainer.scrollTop = logsContainer.scrollHeight;
+        }
+        
+        async function startAgent() {
+            const startBtn = document.getElementById('startBtn');
+            startBtn.disabled = true;
+            startBtn.textContent = 'Starting...';
+            
+            try {
+                const response = await fetch(`${API_BASE_URL}/api/start`, { method: 'POST' });
+                if (!response.ok) {
+                    throw new Error('Server not running');
+                }
+                const data = await response.json();
+                
+                if (data.success) {
+                    addLog('Agent started successfully', 'success');
+                } else {
+                    addLog('Failed to start agent: ' + data.error, 'error');
+                    startBtn.disabled = false;
+                    startBtn.textContent = 'Start Agent';
+                }
+            } catch (error) {
+                addLog('Error starting agent: ' + error.message, 'error');
+                startBtn.disabled = false;
+                startBtn.textContent = 'Start Agent';
+            }
+        }
+        
+        async function stopAgent() {
+            const stopBtn = document.getElementById('stopBtn');
+            stopBtn.disabled = true;
+            stopBtn.textContent = 'Stopping...';
+            
+            try {
+                const response = await fetch(`${API_BASE_URL}/api/stop`, { method: 'POST' });
+                if (!response.ok) {
+                    throw new Error('Server not running');
+                }
+                const data = await response.json();
+                
+                if (data.success) {
+                    addLog('Agent stopped successfully', 'info');
+                } else {
+                    addLog('Failed to stop agent: ' + data.error, 'error');
+                    stopBtn.disabled = false;
+                    stopBtn.textContent = 'Stop Agent';
+                }
+            } catch (error) {
+                addLog('Error stopping agent: ' + error.message, 'error');
+                stopBtn.disabled = false;
+                stopBtn.textContent = 'Stop Agent';
+            }
+        }
+        
+        function addLog(message, level = 'info') {
+            const logsContainer = document.getElementById('logsContainer');
+            const time = new Date().toLocaleTimeString();
+            const logEntry = document.createElement('div');
+            logEntry.className = `log-entry ${level}`;
+            logEntry.textContent = `[${time}] ${message}`;
+            
+            if (logsContainer.querySelector('.empty-logs')) {
+                logsContainer.innerHTML = '';
+            }
+            
+            logsContainer.appendChild(logEntry);
+            logsContainer.scrollTop = logsContainer.scrollHeight;
+        }
+    </script>
+</body>
+</html>
+

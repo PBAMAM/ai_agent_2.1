@@ -1,0 +1,11 @@
+livekit
+livekit-agents[mcp,groq,silero,turn-detector,cartesia,openai,deepgram]~=1.0rc
+livekit-plugins-noise-cancellation~=0.2
+python-dotenv
+
+pandas
+PyYAML
+numpy>=1.26.0,<2.3
+anthropic
+flask
+flask-cors
