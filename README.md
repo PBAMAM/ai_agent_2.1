@@ -4,7 +4,7 @@ A LiveKit-based telephony agent for handling printer support calls with integrat
 
 ## Features
 
-- **Printer Issue Knowledge Base**: Comprehensive database of printer issues, resolutions, and KBAs
+- **Printer Issue Knowledge Base**: Comprehensive database of printer issues and resolutions
 - **Claude AI Integration**: Intelligent analysis of complex printer problems using Anthropic's Claude
 - **Conversation Quality Monitoring**: Real-time sentiment analysis and conversation quality tracking
 - **Automated Issue Resolution**: Lookup printer issues by customer description and provide step-by-step solutions
@@ -57,13 +57,9 @@ The assistant includes a comprehensive printer knowledge base with the following
 
 1. **`lookup_printer_issue`**: Search for printer issues by customer description
    - Matches customer descriptions to known issues
-   - Returns resolutions, KBAs, and step-by-step instructions
+   - Returns resolutions and step-by-step instructions
 
-2. **`get_printer_resolution_steps`**: Get detailed steps for a specific KBA
-   - Provides step-by-step resolution instructions
-   - References specific knowledge base articles
-
-3. **`analyze_printer_issue_with_claude`**: Use Claude AI for complex issues
+2. **`analyze_printer_issue_with_claude`**: Use Claude AI for complex issues
    - Intelligent analysis of unusual or complex problems
    - Provides recommendations when issues aren't in the knowledge base
 
@@ -77,7 +73,7 @@ The knowledge base includes resolutions for:
 - Printer offline problems
 - And more...
 
-All issues are mapped to specific KBAs (Knowledge Base Articles) for reference.
+All issues include detailed troubleshooting steps and resolution instructions.
 
 ## Deployment
 
