@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import re
+import time
 from dataclasses import dataclass
 from typing import Optional, List, Dict, Any, Set, Callable
 from functools import lru_cache
@@ -45,6 +46,8 @@ from conversation_analyzer import (
     ConversationQuality,
 )
 from printer_knowledge_base import PrinterKnowledgeBase, PrinterIssue
+from system_tools import SystemTools
+from personality import AdaptivePersonality
 
 # Load environment variables
 load_dotenv(dotenv_path=".env")
@@ -69,10 +72,12 @@ logging.getLogger("opentelemetry.attributes").setLevel(logging.ERROR)
 DEFAULT_PHONE_NUMBER = "1123456"
 TRANSCRIPT_MIN_LENGTH = 3
 TRANSCRIPT_CACHE_SIZE = 100
-MONITORING_INTERVAL = 0.5  # seconds
+MONITORING_INTERVAL = 0.3  # seconds - faster for real-time processing
 STATUS_UPDATE_INTERVAL = 10  # iterations
 AUDIO_THRESHOLD = 0.7
 MAX_ISSUE_MATCHES = 3
+BACKCHANNEL_THRESHOLD = 1.2  # seconds of user speech before backchanneling (more frequent)
+PROACTIVE_SEARCH_THRESHOLD = 1.5  # seconds before starting proactive search
 
 # Goodbye detection keywords (compiled regex for performance)
 GOODBYE_KEYWORDS: Set[str] = {
@@ -138,7 +143,7 @@ class AgentConfig:
 @dataclass
 class SessionConfig:
     """Configuration for the agent session."""
-    llm_model: str = "gpt-4o-mini"
+    llm_model: str = "gpt-5-mini"
     tts_model: str = "sonic-3"
     tts_language: str = "en"
     tts_voice: str = "f9836c6e-a0bd-460e-9d3c-f7299fa60f94"
@@ -217,6 +222,13 @@ class AgentState:
         self.analyzed_transcripts: Set[str] = set()
         self._transcript_cache_size = TRANSCRIPT_CACHE_SIZE
         self.job_context: Optional[JobContext] = None
+        self.system_tools: SystemTools = SystemTools()
+        self.personality: AdaptivePersonality = AdaptivePersonality()
+        self.current_session: Optional[AgentSession] = None
+        self.user_speaking_start_time: Optional[float] = None
+        self.last_backchannel_time: Optional[float] = None
+        self.pending_searches: Dict[str, asyncio.Task] = {}  # Track proactive searches
+        self.interim_transcripts: List[str] = []  # Store interim transcripts
     
     def add_analyzed_transcript(self, transcript: str) -> None:
         """Add transcript to analyzed set with cache management."""
@@ -280,21 +292,56 @@ def build_agent_config() -> Dict[str, Any]:
             "printer_issue_handling": {
             "listen_carefully": "Ask deeper questions about the issue: Ask which line the printer is on (example: Line 1, Line 5). Ask if there are blinking lights, noises, errors, paper jams, out of paper, ink issues, blank/faded prints, or communication errors.",
             "use_knowledge_base": "ALWAYS use lookup_printer_issue before giving any troubleshooting instruction.",
+            "use_system_tools": "You have access to system integration tools: check_printer_status (to verify printer state), send_test_print (to test printer), perform_ink_cleaning (for print quality issues), get_store_information (to get store details), and update_service_ticket (to document the call). Use these tools when appropriate.",
             "follow_steps": "Follow troubleshooting steps exactly as written. Give ONE step at a time, and wait for POC confirmation before moving on.",
-            "provide_resolution": "Guide the POC step-by-step. Use simple language and be patient.",
-            "verify_resolution": "After troubleshooting, verify the printer status, confirm prints are working, or assist with print quality checks.",
+            "provide_resolution": "Guide the POC step-by-step. Use simple language and be patient. Adapt your communication style based on the customer's cooperation level.",
+            "verify_resolution": "After troubleshooting, verify the printer status using check_printer_status, confirm prints are working, or assist with print quality checks.",
             "call_recording": "Remember that printer support calls may be recorded for quality and training.",
-            "test_prints": "Do NOT send test prints unless the POC specifically asks for them.",
-            "cleaning_cycle": "If print quality issues occur or blinking light issue, ask: 'Okay, based on what you've described, it sounds like your printer may need a cleaning cycle. I'm going to walk you through this process. It will take about one minute. Are you ready?' Wait for confirmation. Then guide them: 'First, locate the [specific button] on your printer. Can you see it?' Wait for confirmation. 'Now, press and hold that button for about 3 seconds until the light changes. Let me know when you've done that.' Wait for customer action. 'Perfect. You're doing great. Now the printer should begin its cleaning cycle. This will take about a minute. The light may blink during this process - that's normal. Let's wait for it to complete.' While waiting: 'While we're waiting, I want to let you know that this cleaning cycle helps maintain your printer's print quality and can resolve many common issues.' After cleaning cycle: 'Okay, the cleaning cycle should be complete now. Can you check the printer? The light should now be solid green and no longer blinking. What do you see?'",
-            "dispatch_escalation": "If remote troubleshooting fails, offer escalation. Ask: 'I can escalate this ticket and send a technician to your location if you'd like. Would you like me to arrange a tech visit?'"
+            "test_prints": "Do NOT send test prints unless the POC specifically asks for them. Use send_test_print tool only when requested or after resolving an issue.",
+            "cleaning_cycle": "If print quality issues occur or blinking light issue, you can use perform_ink_cleaning tool for remote cleaning, or guide them manually: 'Okay, based on what you've described, it sounds like your printer may need a cleaning cycle. I'm going to walk you through this process. It will take about one minute. Are you ready?' Wait for confirmation. Then guide them: 'First, locate the [specific button] on your printer. Can you see it?' Wait for confirmation. 'Now, press and hold that button for about 3 seconds until the light changes. Let me know when you've done that.' Wait for customer action. 'Perfect. You're doing great. Now the printer should begin its cleaning cycle. This will take about a minute. The light may blink during this process - that's normal. Let's wait for it to complete.' While waiting: 'While we're waiting, I want to let you know that this cleaning cycle helps maintain your printer's print quality and can resolve many common issues.' After cleaning cycle: 'Okay, the cleaning cycle should be complete now. Can you check the printer? The light should now be solid green and no longer blinking. What do you see?'",
+            "dispatch_escalation": "If remote troubleshooting fails, offer escalation. Ask: 'I can escalate this ticket and send a technician to your location if you'd like. Would you like me to arrange a tech visit?' Use update_service_ticket to document escalation.",
+            "natural_language_patterns": {
+                "opening": [
+                    "Hi there! This is {agent_name} from Catalina support. I'm calling about the printer on Lane {lane} - I can see it's showing {issue}. Do you have a quick minute to help me check on it?",
+                    "Good {time_of_day}! My name is {agent_name} with Catalina. I'm reaching out because we've detected {issue} on your Lane {lane} printer. Would you be able to take a look at it with me?"
+                ],
+                "acknowledging_busy": [
+                    "I totally understand you're busy right now. This should only take about {estimated_time} minutes, and then you'll be all set.",
+                    "I know you've got a lot going on. Let's get this sorted quickly so it doesn't hold you up."
+                ],
+                "providing_instructions": [
+                    "Okay, here's what I need you to do: {instruction}. Just take your time, and let me know when you're ready for the next step.",
+                    "Alright, so if you could {instruction} for me. And don't worry, I'll walk you through everything step by step."
+                ],
+                "checking_status": [
+                    "Let me just check something on my end real quick... {thinking_pause} ... Okay, I can see that {finding}.",
+                    "Give me just a second while I pull that up... {system_query} ... Alright, so what I'm seeing is {finding}."
+                ],
+                "celebrating_success": [
+                    "Perfect! That did the trick. The printer is back online and looking good.",
+                    "Excellent! We're all set. The issue is resolved and everything should be working normally now."
+                ],
+                "expressing_empathy": [
+                    "I know dealing with printer issues can be frustrating, especially when you're in the middle of a rush.",
+                    "I really appreciate your patience with this. I know it's not convenient timing."
+                ],
+                "handling_complications": [
+                    "Okay, so that didn't quite do what we were hoping for. Let's try a different approach.",
+                    "Hmm, that's interesting. Let me check one more thing on my end to see what else might be going on."
+                ]
+            }
             },
 
             "communication_with_poc": {
-            "be_clear_and_patient": "Use friendly, simple language. Speak slowly and clearly.",
+            "be_clear_and_patient": "Use friendly, simple language. Speak slowly and clearly. Adapt your pace and detail level based on the customer's cooperation score - if they seem frustrated or confused, slow down and provide more detail.",
+            "natural_conversation": "IMPORTANT: This is a natural conversation, not a scripted interaction. You MUST interrupt the customer frequently with brief acknowledgments like 'Uh-huh', 'Yes', 'Go on', 'I see', 'Okay' while they're speaking to show you're actively listening. Say these every 1-2 seconds while they talk. This makes the conversation feel more human and less robotic.",
+            "proactive_behavior": "IMPORTANT: Don't wait for the customer to finish speaking before you start looking for solutions. As soon as you hear keywords like 'paper', 'ink', 'not printing', 'error', 'blinking light', etc., immediately start searching for solutions using lookup_printer_issue. While searching, ALWAYS say something like 'Let me check that for you' or 'I'm looking into that' - never stay silent while searching. Be proactive and start working on the problem while they're still explaining.",
+            "interruptions": "You can be interrupted by the customer, and you can interrupt them with brief acknowledgments. This is natural conversation flow. If you're interrupted, gracefully stop and listen. If you need to interrupt, use brief phrases like 'I understand', 'Okay', 'Got it' to show you're listening.",
             "confirm_understanding": "Ask 'Do you see that?', 'Can you confirm for me?', 'Let me know when you're ready for the next step.'",
-            "provide_encouragement": "Say things like 'You're doing great', 'Nice job', 'Perfect, thank you', 'You're doing great, we're almost there'.",
-            "handle_unwilling_poc": "If the POC refuses or cannot assist, follow the standard Unwilling POC process.",
-            "store_specific_handling": "Ask early: 'Are you calling from Walgreens, Kroger, Meijer, HEB, or another store?' Some retailers have special procedures.",
+            "provide_encouragement": "Say things like 'You're doing great', 'Nice job', 'Perfect, thank you', 'You're doing great, we're almost there'. Adjust encouragement frequency based on cooperation level.",
+            "adaptive_personality": "Your personality adapts based on customer cooperation: For cooperative customers (score >70), be efficient and appreciative. For reluctant customers (score <40), be very patient, empathetic, and provide more encouragement. For balanced customers (40-70), use standard friendly professional tone.",
+            "handle_unwilling_poc": "If the POC refuses or cannot assist, follow the standard Unwilling POC process. Increase empathy and patience.",
+            "store_specific_handling": "Ask early: 'Are you calling from Walgreens, Kroger, Meijer, HEB, or another store?' Some retailers have special procedures. Use get_store_information to retrieve store details if needed.",
             "empathy_statements": [
                 "I understand how frustrating this must be.",
                 "I appreciate your patience while we work through this.",
@@ -461,6 +508,9 @@ async def lookup_printer_issue(
     Use this when the customer describes a printer problem to find matching
     knowledge base articles and resolution steps.
     
+    IMPORTANT: While searching, say something like "Let me check that for you" or 
+    "I'm looking into that" to acknowledge you're working on it. Don't stay silent.
+    
     Args:
         customer_description: The customer's description of the printer issue
             (e.g., "printer not printing", "paper jam", "ink problem")
@@ -475,6 +525,26 @@ async def lookup_printer_issue(
         }, indent=2)
     
     logger.info(f"🔍 Looking up printer issue for: '{customer_description[:100]}'")
+    
+    # Speak while searching to make it natural
+    if agent_state.current_session:
+        try:
+            search_phrases = [
+                "Let me check that for you",
+                "I'm looking into that right now",
+                "Let me see what I can find about that",
+                "I'm checking on that for you"
+            ]
+            import random
+            search_phrase = random.choice(search_phrases)
+            logger.info(f"💬 Speaking while searching: '{search_phrase}'")
+            asyncio.create_task(
+                agent_state.current_session.generate_reply(
+                    instructions=f"Say ONLY this exact phrase, nothing else: '{search_phrase}'. Keep it brief."
+                )
+            )
+        except Exception as e:
+            logger.debug(f"Error speaking during lookup: {e}")
     
     try:
         # Search the knowledge base
@@ -608,6 +678,205 @@ Be concise and practical. Focus on actionable steps the customer can take."""
 
 
 @function_tool
+async def check_printer_status(
+    run_ctx: RunContext,
+    chain: int,
+    store: int,
+    lane: int,
+) -> str:
+    """
+    Check the current status of a printer via system connection.
+    
+    Use this to verify printer status after troubleshooting steps or to diagnose issues.
+    
+    Args:
+        chain: Chain ID (integer)
+        store: Store number (integer)
+        lane: Lane number where the printer is located (integer)
+    
+    Returns:
+        JSON string with printer status information
+    """
+    logger.info(f"🔍 Checking printer status: Chain {chain}, Store {store}, Lane {lane}")
+    
+    try:
+        result = await agent_state.system_tools.check_printer_status(
+            chain=chain,
+            store=store,
+            lane=lane
+        )
+        
+        return json.dumps(result, indent=2)
+        
+    except Exception as e:
+        logger.error(f"Error checking printer status: {e}")
+        return json.dumps({
+            "success": False,
+            "error": str(e),
+            "message": "Failed to check printer status. Please verify store and lane information."
+        }, indent=2)
+
+
+@function_tool
+async def send_test_print(
+    run_ctx: RunContext,
+    chain: int,
+    store: int,
+    lane: int,
+) -> str:
+    """
+    Send a test coupon to verify printer is working.
+    
+    Use this after troubleshooting to verify the printer is functioning correctly.
+    Only use this if the customer requests a test print or after resolving an issue.
+    
+    Args:
+        chain: Chain ID (integer)
+        store: Store number (integer)
+        lane: Lane number where the printer is located (integer)
+    
+    Returns:
+        JSON string with test print result
+    """
+    logger.info(f"🖨️ Sending test print: Chain {chain}, Store {store}, Lane {lane}")
+    
+    try:
+        result = await agent_state.system_tools.send_test_print(
+            chain=chain,
+            store=store,
+            lane=lane
+        )
+        
+        return json.dumps(result, indent=2)
+        
+    except Exception as e:
+        logger.error(f"Error sending test print: {e}")
+        return json.dumps({
+            "success": False,
+            "error": str(e),
+            "message": "Failed to send test print. Please verify printer is online."
+        }, indent=2)
+
+
+@function_tool
+async def perform_ink_cleaning(
+    run_ctx: RunContext,
+    chain: int,
+    store: int,
+    lane: int,
+) -> str:
+    """
+    Perform a remote ink cleaning cycle on the printer.
+    
+    Use this when print quality issues are reported or when a cleaning cycle is needed.
+    The cleaning cycle takes approximately 60 seconds.
+    
+    Args:
+        chain: Chain ID (integer)
+        store: Store number (integer)
+        lane: Lane number where the printer is located (integer)
+    
+    Returns:
+        JSON string with cleaning cycle status
+    """
+    logger.info(f"🧹 Performing ink cleaning: Chain {chain}, Store {store}, Lane {lane}")
+    
+    try:
+        result = await agent_state.system_tools.perform_ink_cleaning(
+            chain=chain,
+            store=store,
+            lane=lane
+        )
+        
+        return json.dumps(result, indent=2)
+        
+    except Exception as e:
+        logger.error(f"Error performing ink cleaning: {e}")
+        return json.dumps({
+            "success": False,
+            "error": str(e),
+            "message": "Failed to initiate ink cleaning cycle."
+        }, indent=2)
+
+
+@function_tool
+async def update_service_ticket(
+    run_ctx: RunContext,
+    ticket_id: str,
+    status: str,
+    resolution_notes: str,
+) -> str:
+    """
+    Update a ServiceNow ticket with status and resolution notes.
+    
+    Use this to document the call, resolution steps, and final status.
+    
+    Args:
+        ticket_id: ServiceNow ticket ID (string)
+        status: Ticket status - "resolved", "escalated", or "in_progress" (string)
+        resolution_notes: Detailed notes about the issue and resolution (string)
+    
+    Returns:
+        JSON string with update result
+    """
+    logger.info(f"📝 Updating ticket {ticket_id} with status: {status}")
+    
+    try:
+        result = await agent_state.system_tools.update_ticket(
+            ticket_id=ticket_id,
+            status=status,
+            resolution_notes=resolution_notes
+        )
+        
+        return json.dumps(result, indent=2)
+        
+    except Exception as e:
+        logger.error(f"Error updating ticket: {e}")
+        return json.dumps({
+            "success": False,
+            "error": str(e),
+            "message": "Failed to update ticket. Please document manually."
+        }, indent=2)
+
+
+@function_tool
+async def get_store_information(
+    run_ctx: RunContext,
+    chain: int,
+    store: int,
+) -> str:
+    """
+    Get store information from StoreMaster database.
+    
+    Use this to retrieve store details, contact information, and configuration.
+    
+    Args:
+        chain: Chain ID (integer)
+        store: Store number (integer)
+    
+    Returns:
+        JSON string with store information
+    """
+    logger.info(f"🏪 Getting store information: Chain {chain}, Store {store}")
+    
+    try:
+        result = await agent_state.system_tools.get_store_info(
+            chain=chain,
+            store=store
+        )
+        
+        return json.dumps(result, indent=2)
+        
+    except Exception as e:
+        logger.error(f"Error getting store info: {e}")
+        return json.dumps({
+            "success": False,
+            "error": str(e),
+            "message": "Failed to retrieve store information."
+        }, indent=2)
+
+
+@function_tool
 async def end_conversation(run_ctx: RunContext) -> str:
     """
     End the conversation and close the job.
@@ -654,6 +923,19 @@ async def end_conversation(run_ctx: RunContext) -> str:
             await job_context.disconnect()
     except Exception as e:
         logger.debug(f"Job context disconnect error: {e}")
+    
+    # Cleanup system connections
+    try:
+        await agent_state.system_tools.close()
+        logger.info("System connections closed")
+    except Exception as e:
+        logger.debug(f"Error closing system connections: {e}")
+    
+    # Reset personality state
+    try:
+        agent_state.personality.reset()
+    except Exception as e:
+        logger.debug(f"Error resetting personality: {e}")
     
     logger.info(f"✅ Job closed successfully. Job ID: {job_id}")
     return f"Conversation ended successfully. Job {job_id} closed."
@@ -721,18 +1003,85 @@ def detect_goodbye(transcript: str) -> bool:
     return bool(GOODBYE_PATTERN.search(transcript))
 
 
+# Backchanneling phrases for natural conversation
+BACKCHANNEL_PHRASES = [
+    "Uh-huh",
+    "Yes",
+    "Go on",
+    "I see",
+    "Okay",
+    "Right",
+    "Mmm-hmm",
+    "Got it",
+    "Sure",
+    "Alright",
+    "I understand",
+    "I hear you",
+    "Yeah",
+    "Okay, I'm listening",
+    "Keep going"
+]
+
+def get_backchannel_phrase() -> str:
+    """Get a random backchannel phrase for natural conversation."""
+    import random
+    return random.choice(BACKCHANNEL_PHRASES)
+
+
+def detect_printer_issue_keywords(text: str) -> Optional[str]:
+    """
+    Detect printer issue keywords in partial text to enable proactive search.
+    
+    Returns:
+        Issue description if keywords detected, None otherwise
+    """
+    text_lower = text.lower()
+    
+    # Common printer issue keywords
+    issue_keywords = {
+        "paper": ["paper", "out of paper", "no paper", "paper jam", "jammed"],
+        "ink": ["ink", "out of ink", "no ink", "ink empty", "low ink"],
+        "printing": ["not printing", "won't print", "can't print", "printing issue"],
+        "light": ["blinking", "light", "blinking light", "error light"],
+        "error": ["error", "error message", "broken", "not working"],
+        "connection": ["connection", "not connected", "offline", "disconnected"]
+    }
+    
+    for issue_type, keywords in issue_keywords.items():
+        for keyword in keywords:
+            if keyword in text_lower:
+                # Extract context around the keyword
+                words = text_lower.split()
+                keyword_idx = -1
+                for i, word in enumerate(words):
+                    if keyword in word or word in keyword:
+                        keyword_idx = i
+                        break
+                
+                if keyword_idx >= 0:
+                    # Get surrounding context (3 words before and after)
+                    start = max(0, keyword_idx - 3)
+                    end = min(len(words), keyword_idx + 4)
+                    context = " ".join(words[start:end])
+                    return context
+    
+    return None
+
+
 async def process_user_transcript(
     transcript: str,
     analyzer: ConversationAnalyzer,
     ctx: JobContext,
+    is_interim: bool = False,
 ) -> None:
     """
-    Process a user transcript with analysis and goodbye detection.
+    Process a user transcript with analysis, backchanneling, and proactive search.
     
     Args:
         transcript: The transcript text to process
         analyzer: The conversation analyzer instance
         ctx: The job context
+        is_interim: Whether this is an interim (partial) transcript
     """
     if not analyzer or not transcript:
         return
@@ -743,6 +1092,74 @@ async def process_user_transcript(
     if len(transcript_text) <= TRANSCRIPT_MIN_LENGTH:
         return
     
+    # Track user speaking time for backchanneling
+    current_time = time.time()
+    if agent_state.user_speaking_start_time is None:
+        agent_state.user_speaking_start_time = current_time
+    
+    # For interim transcripts, process for proactive actions
+    if is_interim:
+        agent_state.interim_transcripts.append(transcript_text)
+        # Keep only last 5 interim transcripts
+        if len(agent_state.interim_transcripts) > 5:
+            agent_state.interim_transcripts.pop(0)
+        
+        # Check if we should backchannel (user has been speaking for a while)
+        speaking_duration = current_time - agent_state.user_speaking_start_time
+        last_backchannel = agent_state.last_backchannel_time or 0
+        time_since_last_backchannel = current_time - last_backchannel
+        
+        # Backchannel if user has been speaking for threshold and we haven't backchanneled recently
+        if (speaking_duration >= BACKCHANNEL_THRESHOLD and 
+            time_since_last_backchannel >= BACKCHANNEL_THRESHOLD and
+            agent_state.current_session):
+            try:
+                backchannel = get_backchannel_phrase()
+                logger.info(f"💬 Backchanneling: '{backchannel}'")
+                # Send a quick backchannel response using generate_reply
+                # Use a very brief instruction to minimize response time
+                await agent_state.current_session.generate_reply(
+                    instructions=f"Say ONLY this exact phrase, nothing else: '{backchannel}'. Keep it very brief."
+                )
+                agent_state.last_backchannel_time = current_time
+            except Exception as e:
+                logger.debug(f"Error sending backchannel: {e}")
+        
+        # Proactive search - detect printer issue keywords and start searching
+        issue_description = detect_printer_issue_keywords(transcript_text)
+        if issue_description and issue_description not in agent_state.pending_searches:
+            # Start proactive search in background
+            logger.info(f"🔍 Proactive search triggered for: '{issue_description[:50]}'")
+            
+            # Say something while searching to make it natural
+            if agent_state.current_session:
+                try:
+                    search_phrases = [
+                        "Let me check that for you",
+                        "I'm looking into that",
+                        "Let me see what I can find",
+                        "I'm checking on that"
+                    ]
+                    import random
+                    search_phrase = random.choice(search_phrases)
+                    logger.info(f"💬 Speaking while searching: '{search_phrase}'")
+                    await agent_state.current_session.generate_reply(
+                        instructions=f"Say ONLY this exact phrase, nothing else: '{search_phrase}'. Keep it brief and natural."
+                    )
+                except Exception as e:
+                    logger.debug(f"Error speaking during search: {e}")
+            
+            search_task = asyncio.create_task(
+                proactive_printer_search(issue_description, ctx)
+            )
+            agent_state.pending_searches[issue_description] = search_task
+        
+        # Don't process interim transcripts fully, just use for proactive actions
+        return
+    
+    # Reset speaking time for final transcripts
+    agent_state.user_speaking_start_time = None
+    
     # Check if already analyzed (using set for O(1) lookup)
     if transcript_text in agent_state.analyzed_transcripts:
         return
@@ -752,6 +1169,9 @@ async def process_user_transcript(
     
     try:
         logger.info(f"📝 Captured user transcript: '{transcript_text[:100]}'")
+        
+        # Update personality with user response
+        agent_state.personality.add_user_response(transcript_text)
         
         # Analyze transcript
         await analyzer.analyze_text(transcript_text, is_agent=False)
@@ -784,6 +1204,36 @@ async def process_user_transcript(
                 
     except Exception as e:
         logger.error(f"Error processing user transcript: {e}")
+
+
+async def proactive_printer_search(issue_description: str, ctx: JobContext) -> None:
+    """
+    Proactively search for printer issues while user is still speaking.
+    
+    Args:
+        issue_description: Partial issue description detected
+        ctx: The job context
+    """
+    try:
+        # Wait a bit to see if we get more context
+        await asyncio.sleep(0.5)
+        
+        # Combine with any additional interim transcripts
+        if agent_state.interim_transcripts:
+            combined = " ".join(agent_state.interim_transcripts[-3:])  # Last 3 interim
+            if len(combined) > len(issue_description):
+                issue_description = combined
+        
+        # Search the knowledge base proactively
+        matches = agent_state.printer_kb.search_by_caller_description(issue_description)
+        
+        if matches:
+            logger.info(f"✅ Proactive search found {len(matches)} potential matches")
+            # Store results for when the agent needs them
+            # The agent can access these through lookup_printer_issue
+        
+    except Exception as e:
+        logger.debug(f"Error in proactive search: {e}")
 
 
 async def monitor_user_transcriptions(
@@ -887,18 +1337,18 @@ def setup_transcript_hooks(
     ctx: JobContext,
 ) -> None:
     """
-    Set up transcript hooks for various message sources.
+    Set up transcript hooks for various message sources including interim results.
     
     Args:
         session: The agent session
         ctx: The job context
     """
-    async def on_user_transcript_wrapper(transcript: str) -> None:
-        """Wrapper for processing user transcripts."""
+    async def on_user_transcript_wrapper(transcript: str, is_interim: bool = False) -> None:
+        """Wrapper for processing user transcripts (both final and interim)."""
         if agent_state.analyzer:
-            await process_user_transcript(transcript, agent_state.analyzer, ctx)
+            await process_user_transcript(transcript, agent_state.analyzer, ctx, is_interim=is_interim)
     
-    # Hook into session user messages
+    # Hook into session user messages (final transcripts)
     try:
         if hasattr(session, 'on_user_message'):
             original_handler = session.on_user_message
@@ -907,11 +1357,38 @@ def setup_transcript_hooks(
                 if original_handler:
                     await original_handler(message)
                 if hasattr(message, 'content'):
-                    await on_user_transcript_wrapper(message.content)
+                    await on_user_transcript_wrapper(message.content, is_interim=False)
             
             session.on_user_message = wrapped_handler
     except Exception as e:
         logger.debug(f"Error setting up session user message hook: {e}")
+    
+    # Hook into STT interim results for real-time processing
+    try:
+        if hasattr(session, 'stt') and hasattr(session.stt, 'on'):
+            def on_interim_transcript(transcript: Any) -> None:
+                """Handle interim transcription results."""
+                try:
+                    # Extract text from interim result
+                    if hasattr(transcript, 'text'):
+                        text = transcript.text
+                    elif hasattr(transcript, 'alternatives') and transcript.alternatives:
+                        text = transcript.alternatives[0].transcript
+                    elif isinstance(transcript, str):
+                        text = transcript
+                    else:
+                        text = str(transcript)
+                    
+                    if text and len(text.strip()) > TRANSCRIPT_MIN_LENGTH:
+                        asyncio.create_task(on_user_transcript_wrapper(text, is_interim=True))
+                except Exception as e:
+                    logger.debug(f"Error processing interim transcript: {e}")
+            
+            # Try to hook into Deepgram interim results
+            if hasattr(session.stt, 'on'):
+                session.stt.on("interim_result", on_interim_transcript)
+    except Exception as e:
+        logger.debug(f"Error setting up interim transcript hook: {e}")
     
     # Hook into room data packets
     try:
@@ -966,6 +1443,11 @@ async def entrypoint(ctx: JobContext) -> None:
         get_conversation_quality,
         lookup_printer_issue,
         analyze_printer_issue_with_claude,
+        check_printer_status,
+        send_test_print,
+        perform_ink_cleaning,
+        update_service_ticket,
+        get_store_information,
         end_conversation,
     ]
     
@@ -986,11 +1468,17 @@ async def entrypoint(ctx: JobContext) -> None:
     # Create session configuration
     session_config = SessionConfig()
     
-    # Create agent session
+    # Create agent session with real-time transcription support
     session = AgentSession(
         mcp_servers=mcp_servers,
         vad=silero.VAD.load(),
-        stt=deepgram.STT(),
+        stt=deepgram.STT(
+            # Enable interim results for real-time processing
+            interim_results=True,
+            # Lower latency for faster response
+            model="nova-2",
+            language="en-US",
+        ),
         llm=openai.LLM(model=session_config.llm_model),
         tts=cartesia.TTS(
             model=session_config.tts_model,
@@ -998,6 +1486,9 @@ async def entrypoint(ctx: JobContext) -> None:
             voice=session_config.tts_voice,
         ),
     )
+    
+    # Store session reference for backchanneling
+    agent_state.current_session = session
     
     # Create quality change handler
     on_quality_change = create_quality_change_handler()

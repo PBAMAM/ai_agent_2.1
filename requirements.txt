@@ -9,3 +9,7 @@ numpy>=1.26.0,<2.3
 anthropic
 flask
 flask-cors
+
+# System Integration
+paramiko>=3.4.0
+httpx>=0.25.0

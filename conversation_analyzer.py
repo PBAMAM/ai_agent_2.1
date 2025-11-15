@@ -1,12 +1,13 @@
 import asyncio
 import logging
 import numpy as np
+import os
 from typing import Optional, Callable, Dict, Any
 from dataclasses import dataclass
 from enum import Enum
 from livekit import rtc
 from livekit.agents import AgentSession
-from livekit.plugins import openai
+from livekit.plugins import openai, groq
 import json
 
 logger = logging.getLogger("conversation-analyzer")
@@ -56,7 +57,10 @@ class ConversationAnalyzer:
         
         self.audio_levels = []
         self.conversation_history = []
-        self.llm = openai.LLM(model="gpt-4o-mini")
+        
+        # Initialize LLM with fallback support
+        self.llm = None
+        self._initialize_llm()
         
         self.negative_keywords = [
             "angry", "frustrated", "upset", "complaint", "terrible", "awful",
@@ -67,6 +71,34 @@ class ConversationAnalyzer:
         
         self._setup_audio_monitoring()
         self._setup_transcription_monitoring()
+    
+    def _initialize_llm(self):
+        """Initialize LLM with fallback support (OpenAI -> Groq)."""
+        # Try OpenAI first
+        openai_key = os.getenv("OPENAI_API_KEY", "").strip()
+        if openai_key and openai_key.startswith("sk-"):
+            try:
+                self.llm = openai.LLM(model="gpt-4o-mini")
+                logger.info("✅ Conversation analyzer using OpenAI LLM")
+                return
+            except Exception as e:
+                logger.warning(f"⚠️  Failed to initialize OpenAI LLM for analyzer: {e}")
+        
+        # Fallback to Groq
+        groq_key = os.getenv("GROQ_API_KEY", "").strip()
+        if groq_key and groq_key.startswith("gsk_"):
+            try:
+                self.llm = groq.LLM(model="llama-3.1-70b-versatile")
+                logger.info("✅ Conversation analyzer using Groq LLM (fallback)")
+                return
+            except Exception as e:
+                logger.warning(f"⚠️  Failed to initialize Groq LLM for analyzer: {e}")
+        
+        # No LLM available - analyzer will work but without AI sentiment analysis
+        logger.warning(
+            "⚠️  No LLM available for conversation analyzer. "
+            "Sentiment analysis will be disabled. Only keyword-based analysis will work."
+        )
     
     def _setup_audio_monitoring(self):
         async def on_track_subscribed_async(
@@ -141,6 +173,11 @@ class ConversationAnalyzer:
         self._analyze_transcription = analyze_transcription
     
     async def _analyze_sentiment(self, text: str):
+        # Skip sentiment analysis if LLM is not available
+        if self.llm is None:
+            logger.debug("Skipping sentiment analysis (LLM not available)")
+            return
+        
         try:
             logger.info(f"🔍 Analyzing sentiment for: '{text[:50]}...'")
             prompt = f"""Analyze the sentiment of this customer statement on a scale from -1 (very negative) to 1 (very positive). 
