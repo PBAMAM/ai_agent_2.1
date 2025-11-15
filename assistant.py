@@ -14,6 +14,7 @@ import logging
 import os
 import re
 import time
+import numpy as np
 from dataclasses import dataclass
 from typing import Optional, List, Dict, Any, Set, Callable
 from functools import lru_cache
@@ -39,6 +40,10 @@ from livekit.plugins import (
     noise_cancellation,
 )
 from dotenv import load_dotenv
+import numpy as np
+import sys
+import subprocess
+import io
 
 from conversation_analyzer import (
     ConversationAnalyzer,
@@ -229,6 +234,9 @@ class AgentState:
         self.last_backchannel_time: Optional[float] = None
         self.pending_searches: Dict[str, asyncio.Task] = {}  # Track proactive searches
         self.interim_transcripts: List[str] = []  # Store interim transcripts
+        self.background_audio_task: Optional[asyncio.Task] = None  # Background office sounds
+        self.agent_speaking: bool = False  # Track if agent is currently speaking
+        self.background_audio_source: Optional[rtc.AudioSource] = None  # Audio source for background sounds
     
     def add_analyzed_transcript(self, transcript: str) -> None:
         """Add transcript to analyzed set with cache management."""
@@ -272,22 +280,53 @@ def build_agent_config() -> Dict[str, Any]:
             "personality": config.personality,
         },
         "conversation_guidelines": {
-            "greeting_style": "Thank you for calling Catalina Marketing support. My name is Kim. How can I help you today?",
+            "greeting_style": (
+                "Thank you for calling Catalina Marketing support. How can I help you today? "
+                "Say this greeting only once at the very start of the call. "
+                "Do NOT repeat 'Thank you for calling' multiple times or echo it back to the caller."
+            ),
             
-            "introduce_yourself_with_name": "My name is Kim, and I'm here to help you resolve your printer issue today.",
+            "introduce_yourself_with_name": (
+                "You may briefly introduce yourself once at the start, like "
+                "\"I'm Kim from support\", but do not keep repeating your name "
+                "throughout the call."
+            ),
             
             "call_flow": {
-                "step_1_greeting": "After greeting, if customer mentions printer issue, say: 'I understand you're having an issue with your printer. I'll be happy to help you with that. Before we begin, let me verify some information.'",
-                "step_2_customer_verification": "Ask for phone number: 'Could you please confirm your phone number for me?' After they provide it, repeat it back: 'Thank you. I have [repeat phone number]. Is that correct?' Wait for confirmation. Then ask: 'Great. And can you confirm your address?' After they provide it, repeat it back: 'Perfect. I have [repeat address]. Is that correct?' Wait for confirmation.",
+                "step_1_greeting": (
+                    "After greeting, ask an open, friendly question like "
+                    "'What can I help you with today?' or 'What seems to be going on?'. "
+                    "Let the caller talk. Do NOT assume they have a printer issue until they clearly mention "
+                    "a printer or printing problem. "
+                    "ONLY AFTER they mention a printer issue, you may say something natural like: "
+                    "'Okay, no problem at all, I can help you with that.' "
+                    "Then smoothly transition into any information you actually need, without sounding scripted."
+                ),
+                "step_2_customer_verification": (
+                    "If needed, ask for phone number and address in a natural way, one at a time. "
+                    "Avoid sounding like a form. If the caller seems impatient or the info is already known, "
+                    "you may skip repeating every detail back word-for-word."
+                ),
                 "step_3_device_verification": "Ask for serial number: 'Now, can you please provide me with the serial number of your printer? You can usually find this on the back or bottom of the device.' After they provide it, repeat it back: 'Thank you. That's serial number [repeat serial number]. Is that correct?' Wait for confirmation.",
-                "step_4_issue_diagnosis": "Ask about the issue: 'Now, can you tell me what issue you're experiencing with your printer?' Listen for: blinking lights, paper jams, not printing, error messages, connection issues. Then say: 'I understand. You mentioned [summarize issue]. Can you tell me when this problem started?' After response, ask: 'Thank you for that information. And what color is the light that's blinking on your printer?'",
+                "step_4_issue_diagnosis": (
+                    "Ask about the issue in a conversational way: 'Can you tell me what's going on with it?'. "
+                    "Listen first, then ask only the follow‑up questions you actually need. "
+                    "Do NOT fire off a long list of back‑to‑back questions. "
+                    "Ask one question, listen, respond, then move to the next."
+                ),
                 "step_5_troubleshooting": "Use lookup_printer_issue to find the appropriate troubleshooting steps. Walk through steps ONE at a time, waiting for confirmation after each step.",
                 "step_6_verification": "After troubleshooting, verify: 'Excellent! I'm glad we were able to resolve that for you. Let's do a quick test to make sure everything is working properly. Can you try printing a test page for me?' Wait for customer to print. Ask: 'Great! Did the test page print successfully?' If successful: 'Perfect! Your printer is now back online and working properly.' If not: 'I see. Let's try [alternative troubleshooting step] or I can escalate this to our technical team for further assistance.'",
                 "step_7_additional_issues": "Ask: 'Is there anything else I can help you with today?' If they mention another issue, help with that. If they mention billing: 'I understand you're having a billing issue. Let me look into that for you. Can you tell me more about the billing concern?'",
                 "step_8_closing": "If no additional issues: 'I'm glad I could help you today. Just to recap, we've successfully resolved your printer issue by [summarize resolution]. Your printer should now be working properly.' Then: 'Before we end this call, I want to remind you that you can reach our support team anytime if you need assistance. Is there anything else I can clarify for you?' After response: 'Thank you for calling Catalina Marketing support. Have a great day!'"
             },
 
-            "printer_support_focus": "You are a printer support specialist for Catalina Marketing printers (CMC6, CMC7, CMC8, CMC9). Your mission is to help store staff troubleshoot and resolve printer issues remotely with patience, clarity, and step-by-step instructions.",
+            "printer_support_focus": (
+                "You are a printer support specialist for Catalina Marketing printers (CMC6, CMC7, CMC8, CMC9). "
+                "Your mission is to help store staff troubleshoot and resolve printer issues remotely with patience, "
+                "clarity, and step-by-step instructions. "
+                "However, NEVER assume the caller's problem is about a printer until they clearly say so. "
+                "Start by asking what they need help with, listen, and only talk about printers after they mention it."
+            ),
 
             "printer_issue_handling": {
             "listen_carefully": "Ask deeper questions about the issue: Ask which line the printer is on (example: Line 1, Line 5). Ask if there are blinking lights, noises, errors, paper jams, out of paper, ink issues, blank/faded prints, or communication errors.",
@@ -333,8 +372,20 @@ def build_agent_config() -> Dict[str, Any]:
             },
 
             "communication_with_poc": {
-            "be_clear_and_patient": "Use friendly, simple language. Speak slowly and clearly. Adapt your pace and detail level based on the customer's cooperation score - if they seem frustrated or confused, slow down and provide more detail.",
-            "natural_conversation": "IMPORTANT: This is a natural conversation, not a scripted interaction. You MUST interrupt the customer frequently with brief acknowledgments like 'Uh-huh', 'Yes', 'Go on', 'I see', 'Okay' while they're speaking to show you're actively listening. Say these every 1-2 seconds while they talk. This makes the conversation feel more human and less robotic.",
+            "be_clear_and_patient": (
+                "Use friendly, simple language. Speak slowly and clearly. "
+                "Adapt your pace and detail level based on the customer's cooperation score - "
+                "if they seem frustrated or confused, slow down and provide more detail."
+            ),
+            "natural_conversation": (
+                "IMPORTANT: This is a natural conversation, not a scripted interaction. "
+                "Be direct and to the point. Focus on the problem and the next concrete step. "
+                "Use brief acknowledgments like 'Okay', 'Got it', 'Alright' while they're speaking "
+                "to show you're listening, but only occasionally. "
+                "Avoid overusing phrases like 'no problem', 'thank you', or 'thanks' – use them only when "
+                "they really fit, not in every sentence. "
+                "Do NOT repeat the same acknowledgment over and over or interrupt too often."
+            ),
             "proactive_behavior": "IMPORTANT: Don't wait for the customer to finish speaking before you start looking for solutions. As soon as you hear keywords like 'paper', 'ink', 'not printing', 'error', 'blinking light', etc., immediately start searching for solutions using lookup_printer_issue. While searching, ALWAYS say something like 'Let me check that for you' or 'I'm looking into that' - never stay silent while searching. Be proactive and start working on the problem while they're still explaining.",
             "interruptions": "You can be interrupted by the customer, and you can interrupt them with brief acknowledgments. This is natural conversation flow. If you're interrupted, gracefully stop and listen. If you need to interrupt, use brief phrases like 'I understand', 'Okay', 'Got it' to show you're listening.",
             "confirm_understanding": "Ask 'Do you see that?', 'Can you confirm for me?', 'Let me know when you're ready for the next step.'",
@@ -343,17 +394,15 @@ def build_agent_config() -> Dict[str, Any]:
             "handle_unwilling_poc": "If the POC refuses or cannot assist, follow the standard Unwilling POC process. Increase empathy and patience.",
             "store_specific_handling": "Ask early: 'Are you calling from Walgreens, Kroger, Meijer, HEB, or another store?' Some retailers have special procedures. Use get_store_information to retrieve store details if needed.",
             "empathy_statements": [
-                "I understand how frustrating this must be.",
-                "I appreciate your patience while we work through this.",
-                "You're doing great, we're almost there.",
-                "I understand how frustrating this can be.",
-                "Don't worry, we'll get this resolved for you."
+                "I get that this is annoying.",
+                "I know this isn't ideal.",
+                "I hear you.",
+                "Let's sort this out."
             ],
             "reassurance_statements": [
-                "This is a common issue and we can fix it quickly.",
-                "I'll walk you through this step by step.",
-                "Don't worry, I'm here to help.",
-                "This is a common issue and we can fix it quickly."
+                "We'll get this figured out.",
+                "Let me walk you through the next step.",
+                "Let's try something simple first."
             ],
             "transition_phrases": [
                 "Let me take a look at that for you.",
@@ -390,9 +439,17 @@ def build_agent_config() -> Dict[str, Any]:
             }
         },
         "conversation_style": {
-            "tone": "friendly and professional, patient and reassuring, clear and articulate. Use warm, helpful tone with slight variation in pitch to maintain engagement. Be professional but conversational.",
+            "tone": (
+                "sound like a real human support agent, not an AI. "
+                "Be friendly and professional, patient and reassuring, clear and articulate. "
+                "Use a warm, natural tone with subtle variation and short pauses. "
+                "It's okay to have small human imperfections, like a brief hesitation or a quick self‑correction "
+                "('sorry, let me say that more clearly'), but do NOT overdo it."
+            ),
             "pace": (
-                "Moderate speed - not too fast when giving instructions. "
+                "Speak slowly and clearly, at a relaxed pace. "
+                "Keep each response very short: usually 1–2 short sentences. "
+                "Avoid long monologues. "
                 "Pause after questions to allow customer response (wait 3-5 seconds). "
                 "Slow down for technical steps. "
                 "SLOW and methodical - present ONE step, WAIT for confirmation, then proceed. "
@@ -400,8 +457,11 @@ def build_agent_config() -> Dict[str, Any]:
                 "multiple steps at once."
             ),
             "language": (
-                "clear, simple language - avoid technical jargon unless necessary, and "
-                "explain technical terms when used"
+                "Use very clear, simple, human language. "
+                "Use contractions and natural phrasing ('I'm', 'we'll', 'let's', 'you're'). "
+                "Prefer short sentences with one idea at a time. "
+                "Avoid sounding like you're reading from a script. Avoid technical jargon unless necessary, and "
+                "explain technical terms when used."
             ),
             "empathy": (
                 "acknowledge that troubleshooting can be frustrating and show understanding. "
@@ -432,20 +492,27 @@ def build_agent_config() -> Dict[str, Any]:
             "step_7_additional_issues_check",
             "step_8_closing",
         ],
-        "important_notes": [
-            "⚠️ CRITICAL: Follow the 8-step call flow in order: Greeting → Customer Verification → Device Verification → Issue Diagnosis → Troubleshooting → Verification → Additional Issues → Closing",
-            "⚠️ CRITICAL: Give ONE troubleshooting step at a time, then STOP and WAIT for confirmation",
-            "⚠️ CRITICAL: Do NOT list multiple steps in a row - present step 1, wait for completion, then present step 2",
-            "⚠️ CRITICAL: After each step, explicitly ask 'Have you done that?' or 'Did that work?' before continuing",
-            "⚠️ CRITICAL: Always confirm important information by repeating it back (phone numbers, addresses, serial numbers)",
-            "⚠️ CRITICAL: Allow 3-5 seconds after each question for customer response",
-            "Always be respectful of the customer's time and situation - they may be busy with customers",
-            "If the customer seems busy or distracted, offer to call back later",
-            "Never rush the customer through troubleshooting steps - accuracy is more important than speed",
-            "Be patient and methodical - wait for the customer to physically complete each action",
-            "Be honest about what you can and cannot do remotely",
-            "Use natural conversation flow - don't sound like you're reading from a script",
-            "Speak naturally and conversationally - don't mention that you're following a script or reading instructions",
+            "important_notes": [
+            "⚠️ CRITICAL: Use the 8-step call flow as a flexible guideline, not a rigid script. "
+            "Adapt the order and which steps you use based on what the caller has already told you.",
+            "⚠️ CRITICAL: Give ONE troubleshooting step at a time, then STOP and WAIT for confirmation.",
+            "⚠️ CRITICAL: Do NOT list multiple steps in a row - present step 1, wait for completion, then present step 2.",
+            "After each important step, check in briefly (for example 'Did that help?' or 'How did that go?'), "
+            "but do NOT repeat the same question more than once. If you need to ask again, rephrase it naturally "
+            "or move on based on what the caller has already said.",
+            "For critical details like phone numbers or serial numbers, confirm them, but keep it short and natural. "
+            "Don't repeat long strings of numbers more than necessary.",
+            "Allow 3-5 seconds after each question for customer response and avoid stacking questions together. "
+            "Do NOT ask a long series of questions back-to-back; ask one, listen, respond, then decide if you "
+            "really need another.",
+            "Be direct and efficient. Get to the point quickly instead of adding small talk or repeated 'thank you' / 'no problem' phrases.",
+            "Always be respectful of the customer's time and situation - they may be busy with customers.",
+            "If the customer seems busy or distracted, offer to call back later.",
+            "Never rush the customer through troubleshooting steps - accuracy is more important than speed.",
+            "Be patient and methodical - wait for the customer to physically complete each action.",
+            "Be honest about what you can and cannot do remotely.",
+            "Use natural conversation flow - don't sound like you're reading from a script.",
+            "Speak naturally and conversationally - don't mention that you're following a script or reading instructions.",
             "IMPORTANT: When the user says goodbye, thanks you, or indicates the conversation is complete, "
             "you MUST call the end_conversation function to properly close the job",
             "For outbound calls (system alerts), test coupons are only sent if the customer requests them",
@@ -455,6 +522,14 @@ def build_agent_config() -> Dict[str, Any]:
             "If customer answer is unclear, politely ask them to repeat",
             "Document all actions taken during the call for future reference",
             "Offer to send summary email with troubleshooting steps if helpful",
+            "Do NOT say phrases like 'the conversation has ended' or 'I am ending this conversation' to the caller. "
+            "Just close naturally with a normal polite goodbye.",
+            "Do NOT repeat the opening line 'Thank you for calling Catalina Marketing support' more than once. "
+            "If the caller says 'hello' or greets you, respond naturally without saying the full thank-you line again.",
+            "Never say that you are an AI, a bot, a language model, or mention OpenAI, models, tools, or prompts. "
+            "Always speak as a human support agent on the phone.",
+            "If the caller asks if you are an AI, a bot, or a robot, ALWAYS answer 'No' and continue the conversation "
+            "naturally as a human support agent.",
         ],
         "escalation_criteria": [
             "Escalate to human agent if customer becomes very frustrated or angry",
@@ -1028,6 +1103,234 @@ def get_backchannel_phrase() -> str:
     return random.choice(BACKCHANNEL_PHRASES)
 
 
+# ============================================================================
+# Test MP3 Loading (Standalone)
+# ============================================================================
+
+
+# ============================================================================
+# Background Office Sounds Generator
+# ============================================================================
+
+class OfficeSoundGenerator:
+    """
+    Generates synthetic office ambient sounds (keyboard, phone, hum) for background audio.
+    
+    This avoids heavy MP3 processing and guarantees audible background noise.
+    """
+
+    def __init__(self, sample_rate: int = 24000, mp3_file: str = "Office Sounds 30 minutes.mp3"):
+        self.sample_rate = sample_rate
+        self.frame_duration = 0.02  # 20ms frames
+        self.samples_per_frame = int(sample_rate * self.frame_duration)
+        logger.info("✅ Office sound generator initialized (synthetic mode)")
+
+    def _generate_office_frame(self) -> np.ndarray:
+        """
+        Generate a single 20ms frame of office-like sound:
+        - Base ambient noise
+        - Occasional keyboard clicks
+        - Rare short phone-like tone
+        - Low-frequency office hum
+        """
+        # Time axis for this frame
+        t = np.linspace(0, self.frame_duration, self.samples_per_frame, endpoint=False)
+
+        # Base ambient noise (low volume)
+        ambient = 0.015 * np.random.randn(self.samples_per_frame).astype(np.float32)
+
+        # Low-frequency hum (like HVAC/office electronics)
+        hum = 0.01 * np.sin(2 * np.pi * 60 * t)  # 60 Hz
+        ambient += hum.astype(np.float32)
+
+        # Occasional keyboard click (short high-frequency burst)
+        if np.random.rand() < 0.25:  # 25% chance per frame
+            click_len = int(self.samples_per_frame * 0.4)  # 40% of frame
+            click_t = np.linspace(0, click_len / self.sample_rate, click_len, endpoint=False)
+            click = (
+                0.08 * np.sin(2 * np.pi * 1200 * click_t) * np.exp(-click_t * 40)
+            ).astype(np.float32)
+            ambient[:click_len] += click
+
+        # Rare phone "ping" (very short dual-tone)
+        if np.random.rand() < 0.03:  # 3% chance per frame
+            ring_len = int(self.samples_per_frame * 0.8)
+            ring_t = np.linspace(0, ring_len / self.sample_rate, ring_len, endpoint=False)
+            ring = (
+                0.04 * (np.sin(2 * np.pi * 440 * ring_t) + np.sin(2 * np.pi * 480 * ring_t))
+            ).astype(np.float32)
+            envelope = np.linspace(0.0, 1.0, ring_len // 4, endpoint=False)
+            envelope = np.concatenate(
+                [
+                    envelope,
+                    np.ones(ring_len - 2 * len(envelope), dtype=np.float32),
+                    envelope[::-1],
+                ]
+            )
+            ring *= envelope[:ring_len]
+            ambient[:ring_len] += ring
+
+        # Clamp to safe range
+        ambient = np.clip(ambient, -0.3, 0.3)
+        return ambient.astype(np.float32)
+
+    def generate_frame(self, include_sound: bool = True) -> rtc.AudioFrame:
+        """Generate a single stereo audio frame with office background sound."""
+        if include_sound:
+            audio_data = self._generate_office_frame()
+        else:
+            audio_data = np.zeros(self.samples_per_frame, dtype=np.float32)
+
+        # Create stereo (duplicate mono to stereo)
+        stereo_data = np.stack([audio_data, audio_data])
+
+        frame = rtc.AudioFrame(
+            data=stereo_data.tobytes(),
+            sample_rate=self.sample_rate,
+            num_channels=2,
+            samples_per_channel=self.samples_per_frame,
+        )
+
+        return frame
+
+
+async def play_background_office_sounds(
+    room: rtc.Room,
+    sound_generator: OfficeSoundGenerator,
+) -> None:
+    """
+    Play background office sounds while agent is speaking.
+    
+    Args:
+        room: The LiveKit room
+        sound_generator: The office sound generator
+    """
+    publication = None
+    try:
+        # Create audio source
+        source = rtc.AudioSource(sound_generator.sample_rate, 2)  # 2 channels (stereo)
+        track = rtc.LocalAudioTrack.create_audio_track("office-ambient", source)
+        
+        # Publish track to room
+        options = rtc.TrackPublishOptions(source=rtc.TrackSource.SOURCE_MICROPHONE)
+        publication = await room.local_participant.publish_track(track, options)
+        
+        agent_state.background_audio_source = source
+        
+        logger.info("🔊 Background office sounds started - continuous audio stream active")
+        
+        # Generate continuous background audio frames for the entire call
+        frame_interval = sound_generator.frame_duration
+        last_sound_time = 0
+        frame_count = 0
+
+        logger.info("🎵 Starting continuous background office audio")
+
+        while True:
+            await asyncio.sleep(frame_interval)
+            frame_count += 1
+
+            try:
+                current_time = time.time()
+                import random
+
+                # Always play sounds, but more frequently when agent is speaking
+                if agent_state.agent_speaking:
+                    # Agent speaking - play sounds more frequently (every 0.2-0.8 seconds)
+                    should_play_sound = (current_time - last_sound_time >= random.uniform(0.2, 0.8))
+                else:
+                    # Agent not speaking - play sounds less frequently (every 1-3 seconds)
+                    should_play_sound = (current_time - last_sound_time >= random.uniform(1.0, 3.0))
+
+                # Generate frame with sound
+                frame = sound_generator.generate_frame(include_sound=should_play_sound)
+                # Use await to ensure frame is captured properly
+                await source.capture_frame(frame)
+
+                if should_play_sound:
+                    last_sound_time = current_time
+                    if frame_count % 50 == 0:  # Log every 50 frames (1 second)
+                        logger.info(f"🔊 Office sound played (frame {frame_count}, speaking={agent_state.agent_speaking})")
+
+            except Exception as e:
+                logger.warning(f"Error generating background sound: {e}", exc_info=True)
+                
+    except Exception as e:
+        logger.error(f"Error in background office sounds: {e}", exc_info=True)
+    finally:
+        try:
+            if publication:
+                await room.local_participant.unpublish_track(publication)
+                logger.info("🔇 Background office sounds stopped")
+        except Exception as e:
+            logger.debug(f"Error unpublishing background audio: {e}")
+
+
+def setup_agent_speaking_detection(session: AgentSession, room: rtc.Room) -> None:
+    """Set up detection for when agent starts/stops speaking."""
+    try:
+        # Hook into session events if available
+        if hasattr(session, 'on'):
+            def on_agent_speech_start():
+                agent_state.agent_speaking = True
+                logger.info("🎤 Agent speech detected via event - background sounds ON")
+
+            def on_agent_speech_end():
+                agent_state.agent_speaking = False
+                logger.info("🔇 Agent speech ended via event - background sounds OFF")
+
+            try:
+                session.on("agent_speech_start", on_agent_speech_start)
+                session.on("agent_speech_end", on_agent_speech_end)
+                logger.info("✅ Session event handlers registered")
+            except Exception as e:
+                logger.debug(f"Session events not available: {e}")
+
+        # Hook into room audio tracks to detect agent speaking
+        try:
+            def on_track_published(publication: rtc.LocalTrackPublication, participant: rtc.LocalParticipant):
+                if publication.kind == rtc.TrackKind.KIND_AUDIO:
+                    logger.info(f"🎵 Audio track published: {publication.name}")
+                    if hasattr(publication, 'track'):
+                        track = publication.track
+                        if track:
+                            logger.info(f"✅ Audio track available: {track.kind}")
+
+            def on_track_subscribed(track: rtc.RemoteAudioTrack, publication: rtc.RemoteTrackPublication, participant: rtc.RemoteParticipant):
+                logger.info(f"🎧 Remote audio track subscribed: {publication.name}")
+                # This is the agent's own audio track coming back
+                if hasattr(track, 'on'):
+                    def on_frame_received(frame):
+                        if hasattr(frame, 'samples_per_channel') and frame.samples_per_channel > 0:
+                            # Agent is producing audio - likely speaking
+                            agent_state.agent_speaking = True
+                            logger.debug("🎤 Agent audio frame detected - speaking")
+
+                    def on_muted():
+                        agent_state.agent_speaking = False
+                        logger.debug("🔇 Agent audio muted - not speaking")
+
+                    try:
+                        track.on("frame_received", on_frame_received)
+                        track.on("muted", on_muted)
+                        logger.info("✅ Audio frame event handlers registered")
+                    except Exception as e:
+                        logger.debug(f"Could not hook into audio frame events: {e}")
+
+            room.on("track_published", on_track_published)
+            room.on("track_subscribed", on_track_subscribed)
+            logger.info("✅ Room track event handlers registered")
+        except Exception as e:
+            logger.debug(f"Could not hook into room tracks: {e}")
+
+        # Set a default speaking state - assume agent is speaking during initial setup
+        agent_state.agent_speaking = True
+        logger.info("✅ Agent speaking detection setup completed")
+
+    except Exception as e:
+        logger.error(f"Error setting up agent speaking detection: {e}", exc_info=True)
+
+
 def detect_printer_issue_keywords(text: str) -> Optional[str]:
     """
     Detect printer issue keywords in partial text to enable proactive search.
@@ -1425,6 +1728,21 @@ async def entrypoint(ctx: JobContext) -> None:
     """
     await ctx.connect()
     
+    # Local background MP3 playback on macOS (console testing only)
+    mp3_player: Optional[subprocess.Popen] = None
+    if sys.platform == "darwin":
+        try:
+            mp3_path = "Office Sounds 30 minutes.mp3"
+            # -v 0.1 ≈ 10% volume
+            mp3_player = subprocess.Popen(
+                ["afplay", "-v", "0.1", mp3_path],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            logger.info("🔊 Started local background office MP3 via afplay at ~10% volume")
+        except Exception as e:
+            logger.warning(f"Could not start local MP3 background playback: {e}")
+    
     # Extract phone number from participant if available
     try:
         participant = await ctx.wait_for_participant()
@@ -1476,7 +1794,7 @@ async def entrypoint(ctx: JobContext) -> None:
             # Enable interim results for real-time processing
             interim_results=True,
             # Lower latency for faster response
-            model="nova-2",
+            model="nova-3",
             language="en-US",
         ),
         llm=openai.LLM(model=session_config.llm_model),
@@ -1484,6 +1802,8 @@ async def entrypoint(ctx: JobContext) -> None:
             model=session_config.tts_model,
             language=session_config.tts_language,
             voice=session_config.tts_voice,
+            speed=0.9,          # Slower, easier to understand
+            # Use default sample rate for clearer audio; telephony path will still make it sound like a phone
         ),
     )
     
@@ -1513,6 +1833,16 @@ async def entrypoint(ctx: JobContext) -> None:
     # Set up transcript hooks
     setup_transcript_hooks(session, ctx)
     
+    # Set up agent speaking detection for background sounds
+    setup_agent_speaking_detection(session, ctx.room)
+    
+    # Start background office sounds from MP3 file (20% volume)
+    sound_generator = OfficeSoundGenerator(sample_rate=24000, mp3_file="Office Sounds 30 minutes.mp3")
+    agent_state.background_audio_task = asyncio.create_task(
+        play_background_office_sounds(ctx.room, sound_generator)
+    )
+    logger.info("🔊 Background office sounds from MP3 file initialized at 20% volume")
+    
     # Start monitoring task
     asyncio.create_task(monitor_user_transcriptions(session, agent_state.analyzer, ctx))
     
@@ -1521,7 +1851,7 @@ async def entrypoint(ctx: JobContext) -> None:
         Follow the technical support call flow script:
         
         STEP 1 - GREETING & ISSUE IDENTIFICATION:
-        Say: "Thank you for calling Catalina Marketing support. My name is Kim. How can I help you today?"
+        Say: "Thank you for calling Catalina Marketing support. How can I help you today?"
         Wait for customer response.
         If they mention a printer issue, say: "I understand you're having an issue with your printer. I'll be happy to help you with that. Before we begin, let me verify some information."
         
