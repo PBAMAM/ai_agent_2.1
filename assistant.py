@@ -8,10 +8,32 @@ with conversation analysis, knowledge base integration, and AI-powered assistanc
 
 from __future__ import annotations
 
+# Fix multiprocessing issues on macOS - must be before any other imports
+import multiprocessing
+import sys
+import os
+
+# On macOS with Python 3.12+, fork is deprecated, use spawn
+# Set this before any multiprocessing operations
+if sys.platform == "darwin":  # macOS
+    try:
+        # Check current start method
+        current_method = multiprocessing.get_start_method(allow_none=True)
+        if current_method != 'spawn':
+            # Force spawn method (required for Python 3.12+ on macOS)
+            multiprocessing.set_start_method('spawn', force=True)
+    except RuntimeError:
+        # Already set, ignore
+        pass
+    
+    # Set environment variables to help with spawn process issues
+    os.environ.setdefault('MP_START_METHOD', 'spawn')
+    # Reduce spawn overhead by disabling some checks
+    os.environ.setdefault('PYTHONUNBUFFERED', '1')
+
 import asyncio
 import json
 import logging
-import os
 import re
 import time
 import numpy as np
@@ -40,8 +62,6 @@ from livekit.plugins import (
     noise_cancellation,
 )
 from dotenv import load_dotenv
-import numpy as np
-import sys
 import subprocess
 import io
 
@@ -1764,19 +1784,20 @@ async def entrypoint(ctx: JobContext) -> None:
     await ctx.connect()
     
     # Local background MP3 playback on macOS (console testing only)
-    mp3_player: Optional[subprocess.Popen] = None
-    if sys.platform == "darwin":
-        try:
-            mp3_path = "Office Sounds 30 minutes.mp3"
-            # -v 0.1 ≈ 10% volume
-            mp3_player = subprocess.Popen(
-                ["afplay", "-v", "0.1", mp3_path],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            logger.info("🔊 Started local background office MP3 via afplay at ~10% volume")
-        except Exception as e:
-            logger.warning(f"Could not start local MP3 background playback: {e}")
+    # COMMENTED OUT: Background sound disabled
+    # mp3_player: Optional[subprocess.Popen] = None
+    # if sys.platform == "darwin":
+    #     try:
+    #         mp3_path = "Office Sounds 30 minutes.mp3"
+    #         # -v 0.1 ≈ 10% volume
+    #         mp3_player = subprocess.Popen(
+    #             ["afplay", "-v", "0.1", mp3_path],
+    #             stdout=subprocess.DEVNULL,
+    #             stderr=subprocess.DEVNULL,
+    #         )
+    #         logger.info("🔊 Started local background office MP3 via afplay at ~10% volume")
+    #     except Exception as e:
+    #         logger.warning(f"Could not start local MP3 background playback: {e}")
     
     # Extract phone number from participant if available
     try:
@@ -1869,14 +1890,16 @@ async def entrypoint(ctx: JobContext) -> None:
     setup_transcript_hooks(session, ctx)
     
     # Set up agent speaking detection for background sounds
-    setup_agent_speaking_detection(session, ctx.room)
+    # COMMENTED OUT: Background sound disabled
+    # setup_agent_speaking_detection(session, ctx.room)
     
     # Start background office sounds from MP3 file (20% volume)
-    sound_generator = OfficeSoundGenerator(sample_rate=24000, mp3_file="Office Sounds 30 minutes.mp3")
-    agent_state.background_audio_task = asyncio.create_task(
-        play_background_office_sounds(ctx.room, sound_generator)
-    )
-    logger.info("🔊 Background office sounds from MP3 file initialized at 20% volume")
+    # COMMENTED OUT: Background sound disabled
+    # sound_generator = OfficeSoundGenerator(sample_rate=24000, mp3_file="Office Sounds 30 minutes.mp3")
+    # agent_state.background_audio_task = asyncio.create_task(
+    #     play_background_office_sounds(ctx.room, sound_generator)
+    # )
+    # logger.info("🔊 Background office sounds from MP3 file initialized at 20% volume")
     
     # Start monitoring task
     asyncio.create_task(monitor_user_transcriptions(session, agent_state.analyzer, ctx))
@@ -1961,6 +1984,11 @@ async def entrypoint(ctx: JobContext) -> None:
 
 
 if __name__ == "__main__":
+    # Guard against running in spawned processes (multiprocessing)
+    if multiprocessing.current_process().name != 'MainProcess':
+        # This is a spawned process, don't run the CLI
+        sys.exit(0)
+    
     cli.run_app(WorkerOptions(
         entrypoint_fnc=entrypoint,
         agent_name="telephony-agent",
