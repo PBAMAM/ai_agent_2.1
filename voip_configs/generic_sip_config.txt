@@ -1,0 +1,11 @@
+Generic SIP Configuration
+========================
+
+SIP URI: sip:my-first-ai-project-bkcd5db7.sip.livekit.cloud
+Domain: sip.livekit.cloud
+Server: sip.livekit.cloud
+Port: 5060
+Transport: UDP or TCP
+Password: (usually not required)
+
+Use these settings in any SIP-compatible VoIP client.

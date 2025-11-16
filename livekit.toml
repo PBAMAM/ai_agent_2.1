@@ -1,0 +1,20 @@
+# LiveKit Agent Configuration
+# This file configures the LiveKit agent deployment
+
+[agent]
+# Entry point for the agent
+entrypoint = "assistant.py"
+
+# Project subdomain
+subdomain = "my-first-ai-project-agent"
+
+# Python configuration
+[python]
+# Requirements file location
+requirements = "requirements.txt"
+
+# Docker configuration (optional - uses Dockerfile if present)
+[docker]
+# Dockerfile is used if present
+# Additional docker configuration can be added here
+

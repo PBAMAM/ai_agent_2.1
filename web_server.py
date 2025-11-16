@@ -45,11 +45,11 @@ def run_agent():
         elif os.path.exists("venv/bin/python"):
             python_exe = "venv/bin/python"
         
-        # Start the agent process in dev mode for interactive testing
+        # Start the agent process in console mode for testing
         # Pass environment variables to ensure .env is loaded
         env = os.environ.copy()
         agent_process = subprocess.Popen(
-            [python_exe, "assistant.py", "dev"],
+            [python_exe, "assistant.py", "console"],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -178,11 +178,45 @@ def stop_agent():
 
 
 if __name__ == '__main__':
+    import socket
+    
+    def find_free_port(start_port=5001, max_attempts=10):
+        """Find a free port starting from start_port"""
+        for port in range(start_port, start_port + max_attempts):
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.bind(('', port))
+                    return port
+            except OSError:
+                continue
+        return None
+    
+    # Try to use port 5500, fallback to 5001 or find available port
+    port = None
+    preferred_ports = [5500, 5001, 5002, 5003, 5004, 5005]
+    
+    for test_port in preferred_ports:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                s.bind(('', test_port))
+                port = test_port
+                break
+        except OSError:
+            continue
+    
+    # If preferred ports are all in use, find any free port
+    if port is None:
+        port = find_free_port(5001)
+        if port is None:
+            print("❌ Error: Could not find an available port")
+            exit(1)
+    
     print("\n" + "="*60)
     print("🚀 Catalina Marketing Printer Support Agent - Web Interface")
     print("="*60)
-    print("\n📡 Starting web server on http://localhost:5001")
-    print("🌐 Open your browser and navigate to: http://localhost:5001")
+    print(f"\n📡 Starting web server on http://localhost:{port}")
+    print(f"🌐 Open your browser and navigate to: http://localhost:{port}")
     print("\n⚠️  Make sure your .env file is configured with:")
     print("   - LIVEKIT_URL")
     print("   - LIVEKIT_API_KEY")
@@ -191,5 +225,5 @@ if __name__ == '__main__':
     print("   - DEEPGRAM_API_KEY")
     print("\n" + "="*60 + "\n")
     
-    app.run(host='0.0.0.0', port=5001, debug=False)
+    app.run(host='0.0.0.0', port=port, debug=False)
 

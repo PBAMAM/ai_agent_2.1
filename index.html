@@ -242,7 +242,7 @@
             <p style="color: #856404;"><strong>⚠️ Warning:</strong><br>
             The web server is not running. Please start it with:<br>
             <code style="background: #f8f9fa; padding: 5px 10px; border-radius: 4px; display: inline-block; margin-top: 5px;">python web_server.py</code><br>
-            Then refresh this page or access it at <code style="background: #f8f9fa; padding: 5px 10px; border-radius: 4px;">http://localhost:5001</code></p>
+            Then refresh this page or access it at <code style="background: #f8f9fa; padding: 5px 10px; border-radius: 4px;">http://localhost:5500</code></p>
         </div>
     </div>
     
@@ -261,10 +261,17 @@
             }
         });
         
-        // Get the API base URL - use Flask server port 5001
-        const API_BASE_URL = window.location.port === '5500' || window.location.protocol === 'file:' 
-            ? 'http://localhost:5001' 
-            : '';
+        // Get the API base URL - dynamically detect port
+        // If served from Flask server, use relative URLs (same origin)
+        // If opened as file:// or different origin, try common ports
+        let API_BASE_URL = '';
+        if (window.location.protocol === 'file:' || 
+            (window.location.hostname && window.location.hostname !== 'localhost')) {
+            // For file:// or different origin, try common ports
+            const port = window.location.port || '5500';
+            API_BASE_URL = `http://localhost:${port}`;
+        }
+        // If served from Flask (localhost), use relative URLs (empty string)
         
         async function checkStatus() {
             try {
