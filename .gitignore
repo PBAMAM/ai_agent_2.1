@@ -30,6 +30,9 @@ env/
 .env
 .env.local
 .env.*.local
+.env copy*
+.env.*
+*.env
 
 # IDE
 .vscode/
